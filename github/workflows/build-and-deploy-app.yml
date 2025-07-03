@@ -1,0 +1,81 @@
+# .github/workflows/build-and-deploy-app.yml in mariusmatonis/github-workflow-templates
+name: Reusable Build and Deploy App Image
+
+on:
+  workflow_call: # This makes the workflow reusable
+    inputs:
+      app-name:
+        description: 'Name of the application (e.g., vinted-tryout-app)'
+        required: true
+        type: string
+      docker-repo-path:
+        description: 'Path to Dockerfile context relative to checkout (e.g., app-repo)'
+        required: true
+        type: string
+      infra-repo-name:
+        description: 'Name of the infrastructure repository (e.g., vinted-tryout-infra-demo)'
+        required: true
+        type: string
+      docker-username: # Use inputs for secrets when passing to reusable workflows
+        description: 'Docker Hub username'
+        required: true
+        type: string
+      docker-password:
+        description: 'Docker Hub password'
+        required: true
+        type: string
+      infra-pat:
+        description: 'PAT for infra repo'
+        required: true
+        type: string
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required for pushing to the GitOps repo
+    steps:
+      - name: Checkout app code
+        uses: actions/checkout@v4
+        with:
+          path: ${{ inputs.docker-repo-path }} # Use the input
+
+      - name: Set up Docker BuildX
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker Login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ inputs.docker-username }} # Use the input
+          password: ${{ inputs.docker-password }} # Use the input
+
+      - name: Build and Push Docker Image
+        id: docker_build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ inputs.docker-repo-path }} # Use the input
+          push: true
+          # Image tag now uses the app-name input
+          tags: ${{ inputs.docker-username }}/${{ inputs.app-name }}:${{ github.sha }}
+
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+        with:
+          # Use the infra-repo-name input
+          repository: ${{ github.repository_owner }}/${{ inputs.infra-repo-name }}
+          token: ${{ inputs.infra-pat }} # Use the input
+          path: infra-repo
+
+      - name: Update Kubernetes Manifest in Infra Repo
+        run: |
+          IMAGE_TAG="${{ github.sha }}"
+          # Use app-name input in sed
+          sed -i "s|image: ${{ inputs.docker-username }}/${{ inputs.app-name }}:.*|image: ${{ inputs.docker-username }}/${{ inputs.app-name }}:${IMAGE_TAG}|g" kubernetes/deployment.yaml
+          
+          git config user.name "GitHub Actions Bot"
+          git config user.email "github-actions-bot@users.noreply.github.com"
+          
+          git add kubernetes/deployment.yaml
+          git commit -m "chore: Update ${{ inputs.app-name }} image to ${IMAGE_TAG}" || echo "No changes to commit"
+          git push
+        working-directory: infra-repo
